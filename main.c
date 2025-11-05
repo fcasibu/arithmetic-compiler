@@ -5,10 +5,33 @@
 #include <string.h>
 
 enum token_kind { NUMBER, PLUS, MINUS, STAR, SLASH, PERCENT, LPAREN, RPAREN };
+enum node_type { NODE_NUMBER, NODE_UNARY, NODE_BINARY };
 
 struct token {
     enum token_kind kind;
     uint8_t value;
+};
+
+struct ast_node {
+    enum node_type type;
+    size_t start, end;
+
+    union {
+        struct {
+            int value;
+        } number;
+
+        struct {
+            char op;
+            struct ast_node *child;
+        } unary;
+
+        struct {
+            char op;
+            struct ast_node *left;
+            struct ast_node *right;
+        } binary;
+    } data;
 };
 
 struct lexer {
