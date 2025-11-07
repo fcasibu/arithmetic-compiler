@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <ctype.h>
 #include <math.h>
 #include <stdint.h>
@@ -7,12 +6,14 @@
 #include <string.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <getopt.h>
 
-enum token_kind { NUMBER, PLUS, MINUS, STAR, SLASH, PERCENT, CARET, LPAREN, RPAREN, END_OF_FILE };
 enum node_type { NODE_NUMBER, NODE_UNARY, NODE_BINARY };
+enum ast_print_type { AST_S_EXPR = 1, AST_JSON = 2 };
+enum token_kind { NUMBER, PLUS, MINUS, STAR, SLASH, PERCENT, CARET, LPAREN, RPAREN, END_OF_FILE };
 
 union token_value {
-    uint8_t value;
+    char value;
     double number_value;
 };
 
@@ -28,12 +29,12 @@ union node_data {
     } number;
 
     struct {
-        uint8_t op;
+        enum token_kind op;
         struct ast_node *child;
     } unary;
 
     struct {
-        uint8_t op;
+        enum token_kind op;
         struct ast_node *left;
         struct ast_node *right;
     } binary;
@@ -47,7 +48,6 @@ struct ast_node {
 };
 
 struct lexer {
-    char ch;
     size_t cursor;
 
     struct token *tokens;
@@ -62,7 +62,17 @@ struct parser {
     size_t current_index;
 };
 
-double eval_ast(struct ast_node *root);
+struct cli_options {
+    bool show_help;
+    enum ast_print_type show_ast;
+    char *expression;
+};
+
+void process_expression(struct cli_options *opts);
+void print_help(void);
+void parse_args(int argc, char **argv, struct cli_options *opts);
+
+double eval_ast(const struct ast_node *root);
 struct ast_node *parse(struct lexer *lex);
 struct ast_node *parse_expression(struct parser *parser, uint8_t binding_power);
 struct ast_node *parse_prefix(struct parser *parser, const struct token *token);
@@ -73,9 +83,10 @@ struct ast_node *create_ast_node(enum node_type type, union node_data data, size
                                  size_t end);
 void free_ast_node(struct ast_node *node);
 char *get_token_kind_string(enum token_kind kind);
-void print_ast(struct ast_node *node);
+void print_indent(size_t level);
+void print_ast_json(const struct ast_node *node, size_t level);
+void print_ast(const struct ast_node *node);
 
-void print_token(const struct token *tok);
 struct token create_token(enum token_kind kind, union token_value value, size_t start, size_t end);
 
 void init_lexer(struct lexer *lex);
@@ -85,7 +96,7 @@ bool is_part_of_number(char character);
 void parse_number(struct lexer *lex, const char *source);
 void append_token(struct lexer *lex, struct token tok);
 
-double eval_ast(struct ast_node *root)
+double eval_ast(const struct ast_node *root)
 {
     switch (root->type) {
     case NODE_NUMBER: {
@@ -96,8 +107,10 @@ double eval_ast(struct ast_node *root)
         switch (root->data.unary.op) {
         case MINUS:
             return -eval_ast(root->data.unary.child);
+        case PLUS:
+            return eval_ast(root->data.unary.child);
         default: {
-            (void)fprintf(stderr, "Unknown unary operator");
+            (void)fprintf(stderr, "Unknown unary operator\n");
             exit(EXIT_FAILURE);
         }
         }
@@ -112,16 +125,28 @@ double eval_ast(struct ast_node *root)
             return lhs + rhs;
         case MINUS:
             return lhs - rhs;
-        case SLASH:
+        case SLASH: {
+            if (rhs == 0.0) {
+                (void)fprintf(stderr, "Division by zero\n");
+                exit(EXIT_FAILURE);
+            }
+
             return lhs / rhs;
+        }
         case STAR:
             return lhs * rhs;
         case CARET:
             return pow(lhs, rhs);
-        case PERCENT:
+        case PERCENT: {
+            if (rhs == 0.0) {
+                (void)fprintf(stderr, "Division by zero\n");
+                exit(EXIT_FAILURE);
+            }
+
             return fmod(lhs, rhs);
+        }
         default: {
-            (void)fprintf(stderr, "Unknown binary operator");
+            (void)fprintf(stderr, "Unknown binary operator\n");
             exit(EXIT_FAILURE);
         }
         }
@@ -149,7 +174,80 @@ char *get_token_kind_string(enum token_kind kind)
     }
 }
 
-void print_ast(struct ast_node *node)
+void print_indent(size_t level)
+{
+    for (size_t i = 0; i < level; i++) {
+        printf(" ");
+    }
+}
+
+void print_ast_json(const struct ast_node *node, size_t level)
+{
+    if (!node) {
+        printf("null");
+        return;
+    }
+
+    size_t indent = level * 2;
+
+    switch (node->type) {
+    case NODE_NUMBER: {
+        printf("{\n");
+        print_indent(indent + 2);
+        printf("\"type\": \"number\",\n");
+        print_indent(indent + 2);
+        printf("\"value\": %g,\n", node->data.number.value);
+        print_indent(indent + 2);
+        printf("\"start\": %zu,\n", node->start);
+        print_indent(indent + 2);
+        printf("\"end\": %zu\n", node->end);
+        print_indent(indent);
+        printf("}");
+    } break;
+
+    case NODE_UNARY: {
+        printf("{\n");
+        print_indent(indent + 2);
+        printf("\"type\": \"unary\",\n");
+        print_indent(indent + 2);
+        printf("\"op\": \"%s\",\n", get_token_kind_string(node->data.unary.op));
+        print_indent(indent + 2);
+        printf("\"start\": %zu,\n", node->start);
+        print_indent(indent + 2);
+        printf("\"end\": %zu,\n", node->end);
+        print_indent(indent + 2);
+        printf("\"child\": ");
+        print_ast_json(node->data.unary.child, level + 1);
+        printf("\n");
+        print_indent(indent);
+        printf("}");
+    } break;
+
+    case NODE_BINARY: {
+        printf("{\n");
+        print_indent(indent + 2);
+        printf("\"type\": \"binary\",\n");
+        print_indent(indent + 2);
+        printf("\"op\": \"%s\",\n", get_token_kind_string(node->data.binary.op));
+        print_indent(indent + 2);
+        printf("\"start\": %zu,\n", node->start);
+        print_indent(indent + 2);
+        printf("\"end\": %zu,\n", node->end);
+        print_indent(indent + 2);
+        printf("\"left\": ");
+        print_ast_json(node->data.binary.left, level + 1);
+        printf(",\n");
+        print_indent(indent + 2);
+        printf("\"right\": ");
+        print_ast_json(node->data.binary.right, level + 1);
+        printf("\n");
+        print_indent(indent);
+        printf("}");
+    } break;
+    }
+}
+
+void print_ast(const struct ast_node *node)
 {
     if (!node) {
         return;
@@ -213,7 +311,12 @@ uint8_t get_right_binding_power(enum token_kind kind)
 struct ast_node *create_ast_node(enum node_type type, union node_data data, size_t start,
                                  size_t end)
 {
-    struct ast_node *node = (struct ast_node *)malloc(sizeof(struct ast_node));
+    struct ast_node *node = malloc(sizeof(struct ast_node));
+    if (!node) {
+        (void)fprintf(stderr, "Go download more ram\n");
+        exit(EXIT_FAILURE);
+    }
+
     node->type = type;
     node->start = start;
     node->end = end;
@@ -224,7 +327,10 @@ struct ast_node *create_ast_node(enum node_type type, union node_data data, size
 
 struct token get_next_token(struct parser *parser)
 {
-    assert(parser->current_index < parser->size);
+    if (parser->tokens[parser->current_index].kind == END_OF_FILE) {
+        (void)fprintf(stderr, "EOF\n");
+        exit(EXIT_FAILURE);
+    }
 
     return parser->tokens[parser->current_index++];
 }
@@ -239,18 +345,19 @@ struct ast_node *parse(struct lexer *lex)
 
 struct ast_node *parse_expression(struct parser *parser, uint8_t binding_power)
 {
-    if (parser->current_index >= parser->size) {
+    if (parser->tokens[parser->current_index].kind == END_OF_FILE) {
         return NULL;
     }
 
     struct token tok = get_next_token(parser);
     struct ast_node *lhs = parse_prefix(parser, &tok);
 
-    while (true) {
-        if (parser->current_index >= parser->size) {
-            break;
-        }
+    if (!lhs) {
+        (void)fprintf(stderr, "Expected left hand side\n");
+        exit(EXIT_FAILURE);
+    }
 
+    while (parser->tokens[parser->current_index].kind != END_OF_FILE) {
         struct token next = parser->tokens[parser->current_index];
 
         uint8_t left_binding_power = get_left_binding_power(next.kind);
@@ -262,6 +369,12 @@ struct ast_node *parse_expression(struct parser *parser, uint8_t binding_power)
         uint8_t right_binding_power = get_right_binding_power(operator.kind);
 
         struct ast_node *rhs = parse_expression(parser, right_binding_power);
+
+        if (!rhs) {
+            (void)fprintf(stderr, "Expected right hand side\n");
+            exit(EXIT_FAILURE);
+        }
+
         lhs = create_ast_node(NODE_BINARY,
                               (union node_data){ .binary.left = lhs,
                                                  .binary.right = rhs,
@@ -282,6 +395,25 @@ struct ast_node *parse_prefix(struct parser *parser, const struct token *token)
 
     if (token->kind == MINUS) {
         struct ast_node *rhs = parse_expression(parser, get_left_binding_power(MINUS) + 1);
+
+        if (!rhs) {
+            (void)fprintf(stderr, "Expected right hand side\n");
+            exit(EXIT_FAILURE);
+        }
+
+        return create_ast_node(NODE_UNARY,
+                               (union node_data){ .unary.child = rhs, .unary.op = token->kind },
+                               token->start, token->end);
+    }
+
+    if (token->kind == PLUS) {
+        struct ast_node *rhs = parse_expression(parser, get_left_binding_power(PLUS) + 1);
+
+        if (!rhs) {
+            (void)fprintf(stderr, "Expected right hand side\n");
+            exit(EXIT_FAILURE);
+        }
+
         return create_ast_node(NODE_UNARY,
                                (union node_data){ .unary.child = rhs, .unary.op = token->kind },
                                token->start, token->end);
@@ -289,13 +421,23 @@ struct ast_node *parse_prefix(struct parser *parser, const struct token *token)
 
     if (token->kind == LPAREN) {
         struct ast_node *expr = parse_expression(parser, 0);
+
+        if (!expr) {
+            (void)fprintf(stderr, "Expected expression\n");
+            exit(EXIT_FAILURE);
+        }
+
         struct token tok = get_next_token(parser);
-        assert(tok.kind == RPAREN);
+
+        if (tok.kind != RPAREN) {
+            (void)fprintf(stderr, "Expected ')' at position %zu\n", tok.start);
+            exit(EXIT_FAILURE);
+        }
 
         return expr;
     }
 
-    (void)fprintf(stderr, "Invalid prefix token");
+    (void)fprintf(stderr, "Invalid prefix token\n");
     exit(EXIT_FAILURE);
 }
 
@@ -336,7 +478,7 @@ void append_token(struct lexer *lex, struct token tok)
         struct token *new_tokens = realloc(lex->tokens, lex->capacity * sizeof(struct token));
 
         if (!new_tokens) {
-            (void)fprintf(stderr, "Go download more ram");
+            (void)fprintf(stderr, "Go download more ram\n");
             exit(EXIT_FAILURE);
         }
 
@@ -344,23 +486,6 @@ void append_token(struct lexer *lex, struct token tok)
     }
 
     lex->tokens[lex->size++] = tok;
-}
-
-void print_token(const struct token *tok)
-{
-    switch (tok->kind) {
-    case NUMBER: {
-        printf("Kind = %d, Value = %g, Start = %lu, End = %lu\n", tok->kind,
-               tok->value.number_value, tok->start, tok->end);
-    } break;
-
-    default: {
-        if (tok->kind != END_OF_FILE) {
-            printf("Kind = %d, Value = %c, Start = %lu, End = %lu\n", tok->kind, tok->value.value,
-                   tok->start, tok->end);
-        }
-    }
-    }
 }
 
 struct token create_token(enum token_kind kind, union token_value value, size_t start, size_t end)
@@ -372,13 +497,13 @@ void init_lexer(struct lexer *lex)
 {
     lex->cursor = 0;
 
-    const size_t capacity = 10;
+    static const size_t capacity = 32;
     lex->capacity = capacity;
     lex->size = 0;
-    lex->tokens = (struct token *)malloc(capacity * sizeof(struct token));
+    lex->tokens = malloc(capacity * sizeof(*lex->tokens));
 
     if (!lex->tokens) {
-        (void)fprintf(stderr, "Go download more ram");
+        (void)fprintf(stderr, "Go download more ram\n");
         exit(EXIT_FAILURE);
     }
 }
@@ -402,13 +527,13 @@ void parse_number(struct lexer *lex, const char *source)
     size_t digits_len = lex->cursor - start;
 
     if (!digits_len) {
-        (void)fprintf(stderr, "Invalid character");
+        (void)fprintf(stderr, "Invalid character at position %zu", lex->cursor);
         exit(EXIT_FAILURE);
     }
 
-    char *digits = (char *)malloc(digits_len + 1);
+    char *digits = malloc(digits_len + 1);
     if (!digits) {
-        (void)fprintf(stderr, "Go download more ram");
+        (void)fprintf(stderr, "Go download more ram\n");
         exit(EXIT_FAILURE);
     }
 
@@ -420,8 +545,7 @@ void parse_number(struct lexer *lex, const char *source)
     double val = strtod(digits, &end);
 
     if (errno == ERANGE || *end != '\0') {
-        (void)fprintf(stderr, "Invalid or out of range number: %s", digits);
-        free(digits);
+        (void)fprintf(stderr, "Invalid or out of range number: %s\n", digits);
         exit(EXIT_FAILURE);
     }
 
@@ -447,7 +571,7 @@ void tokenize(struct lexer *lex, const char *source)
 
         switch (character) {
         case '-': {
-            if (isdigit(source[cursor + 1])) {
+            if (cursor + 1 < source_len && isdigit(source[cursor + 1])) {
                 parse_number(lex, source);
                 continue;
             }
@@ -501,21 +625,108 @@ void tokenize(struct lexer *lex, const char *source)
                                    lex->cursor));
 }
 
-int main(void)
+void print_help(void)
 {
-    const char *source = "(-3.24121 + 4) * 1e+20 / (1 - 5) ^ 2 ^ 3 % 7 - 9 * (8 + 6 / 3)";
+    printf("Usage:\n");
+    printf("  ./main [OPTIONS] [EXPRESSION]\n\n");
+
+    printf("Options:\n");
+    printf(
+        "  -e, --eval EXPRESSION       Evaluate expression directly (default if expression provided)\n");
+    printf("  -a, --ast [FORMAT]          Show AST visualization\n");
+    printf("                               FORMAT can be 'json' (default is S-expression)\n");
+    printf("  -h, --help                  Show this help message\n\n");
+}
+
+void parse_args(int argc, char **argv, struct cli_options *opts)
+{
+    static struct option long_options[] = {
+        { "help", no_argument, 0, 'h' },
+        { "eval", required_argument, 0, 'e' },
+        { "ast", optional_argument, 0, 'a' },
+        { NULL, 0, NULL, 0 },
+    };
+
+    int opt = 0;
+
+    while ((opt = getopt_long(argc, argv, "he:a::", long_options, NULL)) != -1) {
+        switch (opt) {
+        case 'h': {
+            opts->show_help = true;
+        } break;
+
+        case 'e': {
+            opts->expression = optarg;
+        } break;
+
+        case 'a': {
+            // optarg is null for short option?? e.g. -a json
+
+            if (!argv[optind]) {
+                opts->show_ast = AST_S_EXPR;
+            } else if (optind < argc && strcmp(argv[optind], "json") == 0) {
+                opts->show_ast = AST_JSON;
+            }
+        } break;
+
+        case '?':
+        default:
+            break;
+        }
+    }
+
+    if (!opts->expression && optind < argc) {
+        opts->expression = argv[optind];
+    }
+}
+
+void process_expression(struct cli_options *opts)
+{
+    if (!opts->expression) {
+        (void)fprintf(stderr, "Missinng expression");
+        return;
+    }
+
     struct lexer lex = { 0 };
     init_lexer(&lex);
 
-    tokenize(&lex, source);
+    tokenize(&lex, opts->expression);
     struct ast_node *root = parse(&lex);
 
-    print_ast(root);
+    if (!root) {
+        (void)fprintf(stderr, "Error: Empty expression\n");
+        free_tokens(lex.tokens);
+        return;
+    }
 
-    printf("\nResult: %.15g", eval_ast(root));
+    if (opts->show_ast == AST_S_EXPR) {
+        printf("AST: ");
+        print_ast(root);
+        printf("\n");
+    }
+
+    if (opts->show_ast == AST_JSON) {
+        print_ast_json(root, 0);
+        printf("\n");
+    }
+
+    printf("Result: %.15g\n", eval_ast(root));
 
     free_ast_node(root);
     free_tokens(lex.tokens);
+}
+
+int main(int argc, char **argv)
+{
+    struct cli_options opts = { 0 };
+    parse_args(argc, argv, &opts);
+
+    if (opts.show_help) {
+        print_help();
+        return 0;
+    }
+
+    process_expression(&opts);
 
     return 0;
 }
