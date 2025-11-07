@@ -5,13 +5,14 @@ Took project inspirations here, go learn and build: [https://github.com/dexter-x
 ## Usage
 
 ```bash
-gcc -o main main.c && ./main "23 + 57 * 8 - 42 / 7 % 19 ^ 4" -a
+gcc -o main main.c && ./main "14 ^ 4 + 100 * 37 - 50 / 25 % 2 + (-47)" -a
 
-AST: (- (+ 23 (* 57 8)) (mod (/ 42 7) (expt 19 4)))
-Result: 473
+AST: (+ (- (+ (expt 14 4) (* 100 37)) (mod (/ 50 25) 2)) -47)
+VM Result: 42069
+Eval Result: 42069
 ```
 
 TODOs
 
-- [ ] bytecode generation and stack vm
+- [x] bytecode generation and stack vm
 - [ ] ???

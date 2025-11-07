@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <ctype.h>
 #include <math.h>
 #include <stdint.h>
@@ -8,9 +9,41 @@
 #include <stdbool.h>
 #include <getopt.h>
 
+#define UNARY_DEFAULT 10
+#define DEFAULT_CAPACITY 32
+#define MAX_STACK_SIZE 255
+
 enum node_type { NODE_NUMBER, NODE_UNARY, NODE_BINARY };
 enum ast_print_type { AST_S_EXPR = 1, AST_JSON = 2 };
 enum token_kind { NUMBER, PLUS, MINUS, STAR, SLASH, PERCENT, CARET, LPAREN, RPAREN, END_OF_FILE };
+// clang-format off
+enum opcode {
+    OP_CONSTANT, OP_ADD, OP_SUBTRACT, OP_MULTIPLY, OP_DIVIDE, 
+    OP_MODULO, OP_POWER,  OP_NEGATE, OP_PLUS, OP_HALT
+};
+// clang-format on
+
+struct bytecode {
+    enum opcode code;
+    size_t const_index;
+};
+
+struct chunk {
+    struct bytecode *code;
+    size_t code_capacity;
+    size_t code_size;
+
+    double *constants;
+    size_t const_capacity;
+    size_t const_size;
+};
+
+struct vm {
+    struct chunk *chunks;
+    size_t ip;
+    double stack[MAX_STACK_SIZE];
+    size_t top;
+};
 
 union token_value {
     char value;
@@ -68,6 +101,17 @@ struct cli_options {
     char *expression;
 };
 
+void push(struct vm *stack_vm, double value);
+double pop(struct vm *stack_vm);
+double run_vm(struct vm *stack_vm);
+
+enum opcode get_opcode_from_token_kind(enum token_kind kind);
+size_t add_constant(struct chunk *chunks, double value);
+void compile_ast_to_bytecode(struct chunk *chunks, struct ast_node *node);
+void emit_bytecode(struct chunk *chunks, enum opcode code, size_t const_index);
+void init_chunks(struct chunk *chunks);
+void free_chunks(struct chunk *chunks);
+
 void process_expression(struct cli_options *opts);
 void print_help(void);
 void parse_args(int argc, char **argv, struct cli_options *opts);
@@ -95,6 +139,242 @@ void tokenize(struct lexer *lex, const char *source);
 bool is_part_of_number(char character);
 void parse_number(struct lexer *lex, const char *source);
 void append_token(struct lexer *lex, struct token tok);
+
+void push(struct vm *stack_vm, double value)
+{
+    if (stack_vm->top >= MAX_STACK_SIZE) {
+        (void)fprintf(stderr, "Stack overflow\n");
+        exit(EXIT_FAILURE);
+    }
+
+    stack_vm->stack[stack_vm->top++] = value;
+}
+
+double pop(struct vm *stack_vm)
+{
+    if (stack_vm->top <= 0) {
+        (void)fprintf(stderr, "Stack undeflow\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return stack_vm->stack[--stack_vm->top];
+}
+
+double run_vm(struct vm *stack_vm)
+{
+    while (true) {
+        struct bytecode instruction = stack_vm->chunks->code[stack_vm->ip];
+
+        switch (instruction.code) {
+        case OP_CONSTANT: {
+            double value = stack_vm->chunks->constants[instruction.const_index];
+
+            push(stack_vm, value);
+        } break;
+
+        case OP_NEGATE: {
+            double value = pop(stack_vm);
+            push(stack_vm, -value);
+        } break;
+
+        case OP_ADD: {
+            double rhs = pop(stack_vm);
+            double lhs = pop(stack_vm);
+
+            push(stack_vm, lhs + rhs);
+        } break;
+        case OP_SUBTRACT: {
+            double rhs = pop(stack_vm);
+            double lhs = pop(stack_vm);
+
+            push(stack_vm, lhs - rhs);
+        } break;
+        case OP_MULTIPLY: {
+            double rhs = pop(stack_vm);
+            double lhs = pop(stack_vm);
+
+            push(stack_vm, lhs * rhs);
+        } break;
+        case OP_DIVIDE: {
+            double rhs = pop(stack_vm);
+            double lhs = pop(stack_vm);
+
+            if (rhs == 0.0) {
+                (void)fprintf(stderr, "Division by zero\n");
+                exit(EXIT_FAILURE);
+            }
+
+            push(stack_vm, lhs / rhs);
+        } break;
+        case OP_MODULO: {
+            double rhs = pop(stack_vm);
+            double lhs = pop(stack_vm);
+
+            if (rhs == 0.0) {
+                (void)fprintf(stderr, "Division by zero\n");
+                exit(EXIT_FAILURE);
+            }
+
+            push(stack_vm, fmod(lhs, rhs));
+        } break;
+        case OP_POWER: {
+            double rhs = pop(stack_vm);
+            double lhs = pop(stack_vm);
+
+            push(stack_vm, pow(lhs, rhs));
+        } break;
+
+        case OP_HALT: {
+            return pop(stack_vm);
+        }
+
+        default: {
+            (void)fprintf(stderr, "Unknown instruction code");
+            exit(EXIT_FAILURE);
+        }
+        }
+
+        stack_vm->ip += 1;
+    }
+}
+
+void free_chunks(struct chunk *chunks)
+{
+    if (!chunks) {
+        return;
+    }
+
+    free(chunks->code);
+    chunks->code = NULL;
+
+    free(chunks->constants);
+    chunks->constants = NULL;
+}
+
+void init_chunks(struct chunk *chunks)
+{
+    chunks->code_capacity = DEFAULT_CAPACITY;
+    chunks->code_size = 0;
+    chunks->code = malloc(chunks->code_capacity * sizeof(*chunks->code));
+
+    if (!chunks->code) {
+        (void)fprintf(stderr, "Go download more ram\n");
+        exit(EXIT_FAILURE);
+    }
+
+    chunks->const_capacity = DEFAULT_CAPACITY;
+    chunks->const_size = 0;
+    chunks->constants = malloc(chunks->const_capacity * sizeof(*chunks->constants));
+
+    if (!chunks->constants) {
+        (void)fprintf(stderr, "Go download more ram\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+enum opcode get_opcode_from_token_kind(enum token_kind kind)
+{
+    switch (kind) {
+    case NUMBER:
+        return OP_CONSTANT;
+    case PLUS:
+        return OP_ADD;
+    case MINUS:
+        return OP_SUBTRACT;
+    case STAR:
+        return OP_MULTIPLY;
+    case SLASH:
+        return OP_DIVIDE;
+    case PERCENT:
+        return OP_MODULO;
+    case CARET:
+        return OP_POWER;
+    default: {
+        return OP_HALT;
+    }
+    }
+}
+
+size_t add_constant(struct chunk *chunks, double value)
+{
+    size_t index = chunks->const_size;
+    if (chunks->const_size >= chunks->const_capacity) {
+        chunks->const_capacity *= 2;
+
+        double *new_constants =
+            realloc(chunks->constants, chunks->const_capacity * sizeof(*chunks->constants));
+
+        if (!new_constants) {
+            (void)fprintf(stderr, "Go download more ram\n");
+            exit(EXIT_FAILURE);
+        }
+
+        chunks->constants = new_constants;
+    }
+
+    chunks->constants[chunks->const_size++] = value;
+
+    return index;
+}
+
+void compile_ast_to_bytecode(struct chunk *chunks, struct ast_node *node)
+{
+    if (!node) {
+        return;
+    }
+
+    switch (node->type) {
+    case NODE_NUMBER: {
+        size_t const_index = add_constant(chunks, node->data.number.value);
+        emit_bytecode(chunks, OP_CONSTANT, const_index);
+    } break;
+
+    case NODE_UNARY: {
+        compile_ast_to_bytecode(chunks, node->data.unary.child);
+
+        switch (node->data.unary.op) {
+        case MINUS: {
+            emit_bytecode(chunks, OP_NEGATE, 0);
+        } break;
+
+        case PLUS:
+            break;
+
+        default: {
+            (void)fprintf(stderr, "No such unary operator");
+            exit(EXIT_FAILURE);
+        }
+        };
+    } break;
+
+    case NODE_BINARY: {
+        compile_ast_to_bytecode(chunks, node->data.binary.left);
+        compile_ast_to_bytecode(chunks, node->data.binary.right);
+
+        emit_bytecode(chunks, get_opcode_from_token_kind(node->data.binary.op), 0);
+    } break;
+    }
+}
+
+void emit_bytecode(struct chunk *chunks, enum opcode code, size_t const_index)
+{
+    if (chunks->code_size >= chunks->code_capacity) {
+        chunks->code_capacity *= 2;
+
+        struct bytecode *new_code =
+            realloc(chunks->code, chunks->code_capacity * sizeof(*chunks->code));
+
+        if (!new_code) {
+            (void)fprintf(stderr, "Go download more ram\n");
+            exit(EXIT_FAILURE);
+        }
+
+        chunks->code = new_code;
+    }
+
+    chunks->code[chunks->code_size++] =
+        (struct bytecode){ .code = code, .const_index = const_index };
+}
 
 double eval_ast(const struct ast_node *root)
 {
@@ -394,7 +674,7 @@ struct ast_node *parse_prefix(struct parser *parser, const struct token *token)
     }
 
     if (token->kind == MINUS) {
-        struct ast_node *rhs = parse_expression(parser, get_left_binding_power(MINUS) + 1);
+        struct ast_node *rhs = parse_expression(parser, UNARY_DEFAULT);
 
         if (!rhs) {
             (void)fprintf(stderr, "Expected right hand side\n");
@@ -407,7 +687,7 @@ struct ast_node *parse_prefix(struct parser *parser, const struct token *token)
     }
 
     if (token->kind == PLUS) {
-        struct ast_node *rhs = parse_expression(parser, get_left_binding_power(PLUS) + 1);
+        struct ast_node *rhs = parse_expression(parser, UNARY_DEFAULT);
 
         if (!rhs) {
             (void)fprintf(stderr, "Expected right hand side\n");
@@ -475,7 +755,7 @@ void append_token(struct lexer *lex, struct token tok)
 {
     if (lex->size >= lex->capacity) {
         lex->capacity *= 2;
-        struct token *new_tokens = realloc(lex->tokens, lex->capacity * sizeof(struct token));
+        struct token *new_tokens = realloc(lex->tokens, lex->capacity * sizeof(*lex->tokens));
 
         if (!new_tokens) {
             (void)fprintf(stderr, "Go download more ram\n");
@@ -496,11 +776,9 @@ struct token create_token(enum token_kind kind, union token_value value, size_t 
 void init_lexer(struct lexer *lex)
 {
     lex->cursor = 0;
-
-    static const size_t capacity = 32;
-    lex->capacity = capacity;
+    lex->capacity = DEFAULT_CAPACITY;
     lex->size = 0;
-    lex->tokens = malloc(capacity * sizeof(*lex->tokens));
+    lex->tokens = malloc(lex->capacity * sizeof(*lex->tokens));
 
     if (!lex->tokens) {
         (void)fprintf(stderr, "Go download more ram\n");
@@ -710,10 +988,23 @@ void process_expression(struct cli_options *opts)
         printf("\n");
     }
 
-    printf("Result: %.15g\n", eval_ast(root));
+    struct chunk chunks = { 0 };
+    init_chunks(&chunks);
+
+    compile_ast_to_bytecode(&chunks, root);
+    emit_bytecode(&chunks, OP_HALT, 0);
+
+    struct vm stack_vm = { .ip = 0, .top = 0, .chunks = &chunks, .stack = { 0 } };
+    double result = run_vm(&stack_vm);
+    double eval_result = eval_ast(root);
+
+    assert(result == eval_result);
+    printf("VM Result: %.15g\n", result);
+    printf("Eval Result: %.15g\n", eval_result);
 
     free_ast_node(root);
     free_tokens(lex.tokens);
+    free_chunks(&chunks);
 }
 
 int main(int argc, char **argv)
